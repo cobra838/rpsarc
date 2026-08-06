@@ -4,7 +4,6 @@ mod bin_format;
 mod cmd_create;
 mod cmd_extract;
 mod mani_json;
-mod zlib123;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
