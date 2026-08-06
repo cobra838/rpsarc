@@ -41,13 +41,50 @@ impl Profile {
   }
 }
 
-fn detect_profile(header: &Info, manifest: &str) -> Profile {
+fn has_orbis_alignment_layout(header: &Info, bss_raw: &[u32]) -> bool {
+  let mut referenced = HashSet::with_capacity(bss_raw.len());
+  let mut unique = HashSet::with_capacity(header.ents.len() - 1);
+  let mut orbis_spares = 0usize;
+  let mut ps3_spares = 0usize;
+
+  for (index, entry) in header.ents.iter().enumerate() {
+    let blocks = entry.unc_len.div_ceil(header.blk_size as u64).max(1) as u32;
+    for block in entry.blk_idx..entry.blk_idx + blocks {
+      referenced.insert(block);
+    }
+    if index == 0 || !unique.insert((entry.blk_idx, entry.blk_off, entry.unc_len)) {
+      continue;
+    }
+
+    let mut remaining = entry.unc_len;
+    let raw = (0..blocks as usize).all(|block| {
+      let expected = remaining.min(header.blk_size as u64) as u32;
+      remaining -= expected as u64;
+      let stored = bss_raw[entry.blk_idx as usize + block];
+      (if stored == 0 { header.blk_size } else { stored }) == expected
+    });
+    if raw {
+      if entry.unc_len >= 2_097_152 {
+        orbis_spares += 1;
+      }
+      if entry.unc_len > 65_536 {
+        ps3_spares += 1;
+      }
+    }
+  }
+
+  let spare_count = bss_raw.len().saturating_sub(referenced.len());
+  spare_count > 0 && spare_count == orbis_spares && spare_count != ps3_spares
+}
+
+fn detect_profile(header: &Info, bss_raw: &[u32], manifest: &str) -> Profile {
   // 0x04 = sorttoc and 0x08 = sortmanifest are Orbis writer flags.
   // Orbis manifests also use NUL separators, unlike the PS3 LF form.
-  if header.flags & 0x0C != 0 || manifest.contains('\0') {
+  if header.flags & 0x0C != 0
+    || manifest.contains('\0')
+    || has_orbis_alignment_layout(header, bss_raw)
+  {
     Profile::OrbisPs4
-  } else if manifest.contains('\n') {
-    Profile::Ps3
   } else {
     Profile::Ps3
   }
@@ -96,7 +133,8 @@ fn load(in_file: PathBuf, profile_override: Option<&str>) -> Result<Loaded> {
   }
   bytes.truncate(entry.unc_len as usize);
   let manifest = String::from_utf8(bytes)?;
-  let profile = parse_profile_override(profile_override)?.unwrap_or_else(|| detect_profile(&header, &manifest));
+  let profile = parse_profile_override(profile_override)?
+    .unwrap_or_else(|| detect_profile(&header, &bss_raw, &manifest));
   let manifest_names = parse_manifest_names(&manifest);
   if manifest_names.len() + 1 != header.ents.len() {
     return Err(anyhow!("manifest name count does not match TOC"));
