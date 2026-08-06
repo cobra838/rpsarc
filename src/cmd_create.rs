@@ -154,7 +154,7 @@ pub fn create(in_json: PathBuf, out_file: PathBuf) -> Result<()> {
         unc_len,
         c_force: mf.force_comp.unwrap_or(c_force),
         c_level: file_level,
-        align_raw: file_level < 0 && unc_len >= raw_align_size,
+        align_raw: file_level < 0 && unc_len > raw_align_size,
         n_blk: unc_len.div_ceil(blk_size as u64).max(1).try_into()?,
       });
     }
