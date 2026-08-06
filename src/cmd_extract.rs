@@ -17,7 +17,24 @@ struct Loaded {
   header: Info,
   bss: Vec<u32>,
   names: Vec<String>,
+  is_orbis_ps4: bool,
   recipe: ManiJson,
+}
+
+fn is_orbis_ps4_likely(header: &Info, manifest: &str) -> bool {
+  // 0x04 = compressmanifest and 0x08 = sortmanifest are Orbis writer flags.
+  // Orbis manifests also use NUL separators, unlike the PS3 LF form.
+  header.flags & 0x0C != 0 || manifest.contains('\0')
+}
+
+// PS3 PSARC stores names separated by LF. Orbis PSARC uses NUL instead (and does not require a final terminator).
+fn parse_manifest_names(manifest: &str, is_orbis_ps4: bool) -> Vec<String> {
+  let separator = if is_orbis_ps4 { '\0' } else { '\n' };
+  manifest
+    .split(separator)
+    .filter(|name| !name.is_empty())
+    .map(str::to_owned)
+    .collect()
 }
 
 fn load(in_file: PathBuf) -> Result<Loaded> {
@@ -43,14 +60,13 @@ fn load(in_file: PathBuf) -> Result<Loaded> {
     );
   }
   bytes.truncate(entry.unc_len as usize);
-  let names = String::from_utf8(bytes)?
-    .split('\n')
-    .map(str::to_owned)
-    .collect::<Vec<_>>();
+  let manifest = String::from_utf8(bytes)?;
+  let is_orbis_ps4 = is_orbis_ps4_likely(&header, &manifest);
+  let names = parse_manifest_names(&manifest, is_orbis_ps4);
   if names.len() + 1 != header.ents.len() {
     return Err(anyhow!("manifest name count does not match TOC"));
   }
-  let profile = if header.flags & 0x0C != 0 {
+  let profile = if is_orbis_ps4 {
     "orbis_ps4"
   } else {
     "ps3"
@@ -104,6 +120,7 @@ fn load(in_file: PathBuf) -> Result<Loaded> {
     header,
     bss,
     names,
+    is_orbis_ps4,
     recipe,
   })
 }
@@ -111,7 +128,7 @@ fn load(in_file: PathBuf) -> Result<Loaded> {
 pub fn inspect(in_file: PathBuf) -> Result<()> {
   let loaded = load(in_file)?;
   let header = &loaded.header;
-  let profile = if header.flags & 0x0C != 0 {
+  let profile = if loaded.is_orbis_ps4 {
     "orbis_ps4 (likely)"
   } else {
     "ps3 (likely)"
@@ -141,6 +158,7 @@ pub fn extract(in_file: PathBuf, out_dir: PathBuf, list_only: bool) -> Result<()
     bss,
     names,
     recipe,
+    ..
   } = load(in_file)?;
 
   println!(
