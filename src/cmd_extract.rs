@@ -7,6 +7,7 @@ use binrw::BinRead;
 use md5::Digest;
 use parseq::ParallelIterator;
 use std::{
+  collections::HashMap,
   fs::{File, create_dir_all},
   io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write},
   path::PathBuf,
@@ -22,14 +23,14 @@ struct Loaded {
 }
 
 fn is_orbis_ps4_likely(header: &Info, manifest: &str) -> bool {
-  // 0x04 = compressmanifest and 0x08 = sortmanifest are Orbis writer flags.
+  // 0x04 = sorttoc and 0x08 = sortmanifest are Orbis writer flags.
   // Orbis manifests also use NUL separators, unlike the PS3 LF form.
   header.flags & 0x0C != 0 || manifest.contains('\0')
 }
 
 // PS3 PSARC stores names separated by LF. Orbis PSARC uses NUL instead (and does not require a final terminator).
-fn parse_manifest_names(manifest: &str, is_orbis_ps4: bool) -> Vec<String> {
-  let separator = if is_orbis_ps4 { '\0' } else { '\n' };
+fn parse_manifest_names(manifest: &str) -> Vec<String> {
+  let separator = if manifest.contains('\0') { '\0' } else { '\n' };
   manifest
     .split(separator)
     .filter(|name| !name.is_empty())
@@ -62,10 +63,34 @@ fn load(in_file: PathBuf) -> Result<Loaded> {
   bytes.truncate(entry.unc_len as usize);
   let manifest = String::from_utf8(bytes)?;
   let is_orbis_ps4 = is_orbis_ps4_likely(&header, &manifest);
-  let names = parse_manifest_names(&manifest, is_orbis_ps4);
-  if names.len() + 1 != header.ents.len() {
+  let manifest_names = parse_manifest_names(&manifest);
+  if manifest_names.len() + 1 != header.ents.len() {
     return Err(anyhow!("manifest name count does not match TOC"));
   }
+
+  let mut by_md5 = HashMap::with_capacity(manifest_names.len());
+  for name in &manifest_names {
+    let md5 = if header.igncase {
+      md5::compute(name.to_ascii_uppercase()).0
+    } else {
+      md5::compute(name).0
+    };
+    if by_md5.insert(md5, name.clone()).is_some() {
+      return Err(anyhow!("duplicate filename MD5 in manifest: {name}"));
+    }
+  }
+
+  // PS3 usually keeps manifest and TOC order. Orbis sort options can change either order, so resolve names by MD5.
+  let names = header.ents[1..]
+    .iter()
+    .map(|entry| {
+      by_md5
+        .get(&entry.name_md5.0)
+        .cloned()
+        .ok_or_else(|| anyhow!("TOC MD5 {} is absent from manifest", entry.name_md5))
+    })
+    .collect::<Result<Vec<_>>>()?;
+
   let profile = if is_orbis_ps4 {
     "orbis_ps4"
   } else {
@@ -84,13 +109,25 @@ fn load(in_file: PathBuf) -> Result<Loaded> {
     })
   };
   let manifest_compressed = compressed(&header.ents[0]);
-  let files = names
+  let stored_by_name = names
     .iter()
     .zip(&header.ents[1..])
-    .map(|(name, entry)| ManiFile {
+    .map(|(name, entry)| (name.as_str(), compressed(entry)))
+    .collect::<HashMap<_, _>>();
+  let mut data_order = header.ents[1..].iter().zip(&names).collect::<Vec<_>>();
+  data_order.sort_by_key(|(entry, _)| entry.blk_off);
+
+  // Keep files in physical PSARC order, sorted by entry Offset.
+  let files = data_order
+    .into_iter()
+    .map(|(_, name)| ManiFile {
       path: name.strip_prefix('/').unwrap_or(name).to_owned(),
       name: None,
-      compressed: Some(compressed(entry)),
+      compressed: Some(
+        *stored_by_name
+          .get(name.as_str())
+          .expect("name resolved from manifest"),
+      ),
       compression_level: None,
       force_comp: None,
     })
@@ -111,8 +148,10 @@ fn load(in_file: PathBuf) -> Result<Loaded> {
     absolute: Some(header.abspath),
     dedup: Some(false),
     compress_manifest: Some(manifest_compressed),
-    file_align_size: Some(65536),
-    file_alignment: Some(8192),
+    sort_toc: is_orbis_ps4.then_some(header.flags & 0x04 != 0),
+    sort_manifest: is_orbis_ps4.then_some(header.flags & 0x08 != 0),
+    file_align_size: Some(if is_orbis_ps4 { 2097152 } else { 65536 }),
+    file_alignment: Some(if is_orbis_ps4 { 65536 } else { 8192 }),
     files,
   };
   Ok(Loaded {

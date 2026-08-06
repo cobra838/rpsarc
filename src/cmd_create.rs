@@ -18,6 +18,7 @@ use std::{
 
 struct PreA {
   path: PathBuf,
+  arc_name: String,
   name_md5: md5::Digest,
   unc_len: u64,
   n_blk: u32,
@@ -29,9 +30,7 @@ struct PreA {
 pub fn create(in_json: PathBuf, out_file: PathBuf) -> Result<()> {
   let json_text = fs::read_to_string(&in_json)?;
   let json: ManiJson = serde_json::from_str(json_text.as_str())?;
-  if json.profile.as_deref() == Some("orbis_ps4") {
-    return Err(anyhow!("orbis_ps4 writer is not implemented yet"));
-  }
+  let is_orbis_ps4 = json.profile.as_deref() == Some("orbis_ps4");
   let v_maj = json.ver_maj;
   let v_min = json.ver_min;
 
@@ -69,13 +68,14 @@ pub fn create(in_json: PathBuf, out_file: PathBuf) -> Result<()> {
 
   println!("- blocks: size {blk_size}");
 
-  // PSARC's regular ps3 writer inserts one ZSize entry containing zero padding before a large file explicitly stored without compression.
+  // PS3 1.4 aligns raw files larger than the threshold (">").
+  // Orbis 1.4 aligns raw files at least as large as the threshold (">=").
   let raw_align_size = json
     .file_align_size
-    .unwrap_or(65536);
+    .unwrap_or(if is_orbis_ps4 { 2097152 } else { 65536 });
   let raw_alignment = json
     .file_alignment
-    .unwrap_or(8192) as u64;
+    .unwrap_or(if is_orbis_ps4 { 65536 } else { 8192 }) as u64;
 
   if !raw_alignment.is_power_of_two() {
     return Err(anyhow!("file_alignment {raw_alignment} is not a power of two"));
@@ -86,11 +86,11 @@ pub fn create(in_json: PathBuf, out_file: PathBuf) -> Result<()> {
   let (manifest, pre_a) = {
     println!("- flags: ignorecase {}, absolute: {}", igncase, abspath);
 
-    let mut manifest = String::new();
     let mut pre_a = Vec::with_capacity(json.files.len() + 1);
 
     pre_a.push(PreA {
       path: PathBuf::from_str("manifest").unwrap(),
+      arc_name: String::new(),
       name_md5: md5::Digest([0u8; 16]),
       unc_len: 0,
       c_force: if json.compress_manifest.unwrap_or(false) { c_force } else { false },
@@ -123,9 +123,6 @@ pub fn create(in_json: PathBuf, out_file: PathBuf) -> Result<()> {
         }
       };
 
-      manifest.push_str(&mf_name);
-      manifest.push('\n');
-
       let name_md5 = if igncase {
         md5::compute(mf_name.to_ascii_uppercase())
       } else {
@@ -150,16 +147,35 @@ pub fn create(in_json: PathBuf, out_file: PathBuf) -> Result<()> {
 
       pre_a.push(PreA {
         path: mf_path,
+        arc_name: mf_name.clone(),
         name_md5,
         unc_len,
         c_force: mf.force_comp.unwrap_or(c_force),
         c_level: file_level,
-        align_raw: file_level < 0 && unc_len > raw_align_size,
+        align_raw: file_level < 0
+          && if is_orbis_ps4 {
+            unc_len >= raw_align_size
+          } else {
+            unc_len > raw_align_size
+          },
         n_blk: unc_len.div_ceil(blk_size as u64).max(1).try_into()?,
       });
     }
 
-    manifest.pop();
+    let mut manifest_names = pre_a[1..]
+      .iter()
+      .map(|e| e.arc_name.as_str())
+      .collect::<Vec<_>>();
+
+    if is_orbis_ps4 && json.sort_manifest.unwrap_or(true) {
+      manifest_names.sort_unstable();
+    }
+
+    let manifest = if is_orbis_ps4 {
+      manifest_names.join("\0")
+    } else {
+      manifest_names.join("\n")
+    };
 
     pre_a[0].unc_len = manifest.len() as u64;
     pre_a[0].n_blk = manifest
@@ -347,6 +363,10 @@ pub fn create(in_json: PathBuf, out_file: PathBuf) -> Result<()> {
     });
   }
 
+  if is_orbis_ps4 && json.sort_toc.unwrap_or(true) {
+    ents[1..].sort_by(|a, b| a.name_md5.0.cmp(&b.name_md5.0));
+  }
+
   out_file.seek(SeekFrom::Start(0))?;
 
   Info {
@@ -355,7 +375,10 @@ pub fn create(in_json: PathBuf, out_file: PathBuf) -> Result<()> {
     compr: comp,
     info_len,
     blk_size,
-    flags: (if igncase { 1 } else { 0 }) | (if abspath { 2 } else { 0 }),
+    flags: (if igncase { 1 } else { 0 })
+      | (if abspath { 2 } else { 0 })
+      | (if is_orbis_ps4 && json.sort_toc.unwrap_or(true) { 4 } else { 0 })
+      | (if is_orbis_ps4 && json.sort_manifest.unwrap_or(true) { 8 } else { 0 }),
     igncase,
     abspath,
     ents,

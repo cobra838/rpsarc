@@ -25,6 +25,10 @@ pub struct ManiJson {
   #[serde(skip_serializing_if = "Option::is_none")]
   pub compress_manifest: Option<bool>,
   #[serde(skip_serializing_if = "Option::is_none")]
+  pub sort_toc: Option<bool>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub sort_manifest: Option<bool>,
+  #[serde(skip_serializing_if = "Option::is_none")]
   pub file_align_size: Option<u64>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub file_alignment: Option<u32>,
