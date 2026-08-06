@@ -23,6 +23,7 @@ struct PreA {
   n_blk: u32,
   c_force: bool,
   c_level: i32,
+  align_raw: bool,
 }
 
 pub fn create(in_json: PathBuf, out_file: PathBuf) -> Result<()> {
@@ -68,6 +69,18 @@ pub fn create(in_json: PathBuf, out_file: PathBuf) -> Result<()> {
 
   println!("- blocks: size {blk_size}");
 
+  // PSARC's regular ps3 writer inserts one ZSize entry containing zero padding before a large file explicitly stored without compression.
+  let raw_align_size = json
+    .file_align_size
+    .unwrap_or(65536);
+  let raw_alignment = json
+    .file_alignment
+    .unwrap_or(8192) as u64;
+
+  if !raw_alignment.is_power_of_two() {
+    return Err(anyhow!("file_alignment {raw_alignment} is not a power of two"));
+  }
+
   let abspath = json.absolute.unwrap_or(false);
   let igncase = json.ignorecase.unwrap_or(false);
   let (manifest, pre_a) = {
@@ -82,6 +95,7 @@ pub fn create(in_json: PathBuf, out_file: PathBuf) -> Result<()> {
       unc_len: 0,
       c_force: if json.compress_manifest.unwrap_or(false) { c_force } else { false },
       c_level: if compression_enabled && json.compress_manifest.unwrap_or(false) { c_level } else { -1 },
+      align_raw: false,
       n_blk: 0,
     });
 
@@ -128,12 +142,19 @@ pub fn create(in_json: PathBuf, out_file: PathBuf) -> Result<()> {
         mf_name
       );
 
+      let file_level = if mf.compressed == Some(false) {
+        -1
+      } else {
+        mf.compression_level.unwrap_or(c_level as u32) as i32
+      };
+
       pre_a.push(PreA {
         path: mf_path,
         name_md5,
         unc_len,
         c_force: mf.force_comp.unwrap_or(c_force),
-        c_level: if mf.compressed == Some(false) { -1 } else { mf.compression_level.unwrap_or(c_level as u32) as i32 },
+        c_level: file_level,
+        align_raw: file_level < 0 && unc_len >= raw_align_size,
         n_blk: unc_len.div_ceil(blk_size as u64).max(1).try_into()?,
       });
     }
@@ -194,6 +215,11 @@ pub fn create(in_json: PathBuf, out_file: PathBuf) -> Result<()> {
       };
       if j == i {
         unique_files.push(i);
+        if pre_a[i].align_raw {
+          i_blk = i_blk
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("total blk count would overflow"))?;
+        }
         pre_b.push(i_blk);
         i_blk = i_blk
           .checked_add(e.n_blk)
@@ -234,7 +260,7 @@ pub fn create(in_json: PathBuf, out_file: PathBuf) -> Result<()> {
   let mut bss = Vec::with_capacity(blk_cnt as usize);
   let mut blk_off = info_len as u64;
 
-  for com_blk in unique_files
+  for (com_blk, align_raw) in unique_files
     .iter()
     .map_while(|ia| {
       match try {
@@ -262,7 +288,7 @@ pub fn create(in_json: PathBuf, out_file: PathBuf) -> Result<()> {
           .read_to_end(&mut blk)
           .with_context(|| anyhow!("read {} block {}", e.path.display(), ib))?;
         blk.resize(got, 0);
-        Ok((blk, e.c_force, e.c_level))
+        Ok((blk, e.c_force, e.c_level, ib == 0 && e.align_raw))
       })
     })
     .map_while(|res| match res {
@@ -272,25 +298,35 @@ pub fn create(in_json: PathBuf, out_file: PathBuf) -> Result<()> {
         None
       }
     })
-    .map_parallel(move |(data, c_force, c_level)| {
+    .map_parallel(move |(data, c_force, c_level, align_raw)| {
       if c_level < 0 {
-        return data;
+        return (data, align_raw);
       }
 
       let com = match comp.com(&data, c_level as _) {
         Ok(com) => com,
-        Err(_) => return data,
+        Err(_) => return (data, align_raw),
       };
 
       if com.len() < data.len() || (c_force && com.len() <= blk_size as usize) {
-        com
+        (com, align_raw)
       } else {
-        data
+        (data, align_raw)
       }
     })
   {
     if err.borrow().is_err() {
       return err.replace(Ok(()));
+    }
+
+    if align_raw {
+      let padding = (raw_alignment - blk_off % raw_alignment) % raw_alignment;
+      bos.push(blk_off);
+      bss.push(padding as u32);
+      if padding != 0 {
+        out_file.write_all(&vec![0; padding as usize])?;
+        blk_off += padding;
+      }
     }
 
     bos.push(blk_off);
