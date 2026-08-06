@@ -18,14 +18,51 @@ struct Loaded {
   header: Info,
   bss: Vec<u32>,
   names: Vec<String>,
-  is_orbis_ps4: bool,
+  profile: Profile,
   recipe: ManiJson,
 }
 
-fn is_orbis_ps4_likely(header: &Info, manifest: &str) -> bool {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Profile {
+  Ps3,
+  OrbisPs4,
+  Unknown,
+}
+
+impl Profile {
+  const fn name(self) -> &'static str {
+    match self {
+      Self::Ps3 => "ps3",
+      Self::OrbisPs4 => "orbis_ps4",
+      Self::Unknown => "unknown",
+    }
+  }
+
+  const fn is_orbis(self) -> bool {
+    matches!(self, Self::OrbisPs4)
+  }
+}
+
+fn detect_profile(header: &Info, manifest: &str) -> Profile {
   // 0x04 = sorttoc and 0x08 = sortmanifest are Orbis writer flags.
   // Orbis manifests also use NUL separators, unlike the PS3 LF form.
-  header.flags & 0x0C != 0 || manifest.contains('\0')
+  if header.flags & 0x0C != 0 || manifest.contains('\0') {
+    Profile::OrbisPs4
+  } else if manifest.contains('\n') {
+    Profile::Ps3
+  } else {
+    // A one-name manifest with flags 0x00 has no on-disk discriminator.
+    Profile::Unknown
+  }
+}
+
+fn parse_profile_override(profile: Option<&str>) -> Result<Option<Profile>> {
+  match profile {
+    None => Ok(None),
+    Some("ps3") => Ok(Some(Profile::Ps3)),
+    Some("orbis_ps4") => Ok(Some(Profile::OrbisPs4)),
+    Some(value) => Err(anyhow!("unknown profile {value}; expected ps3 or orbis_ps4")),
+  }
 }
 
 // PS3 PSARC stores names separated by LF. Orbis PSARC uses NUL instead (and does not require a final terminator).
@@ -38,7 +75,7 @@ fn parse_manifest_names(manifest: &str) -> Vec<String> {
     .collect()
 }
 
-fn load(in_file: PathBuf) -> Result<Loaded> {
+fn load(in_file: PathBuf, profile_override: Option<&str>) -> Result<Loaded> {
   let mut file = File::open_buffered(in_file)?;
   let header = Info::read(&mut file)?;
   let bss_raw = BssType::from_info(&header)?.read_raw(&mut file)?;
@@ -62,7 +99,7 @@ fn load(in_file: PathBuf) -> Result<Loaded> {
   }
   bytes.truncate(entry.unc_len as usize);
   let manifest = String::from_utf8(bytes)?;
-  let is_orbis_ps4 = is_orbis_ps4_likely(&header, &manifest);
+  let profile = parse_profile_override(profile_override)?.unwrap_or_else(|| detect_profile(&header, &manifest));
   let manifest_names = parse_manifest_names(&manifest);
   if manifest_names.len() + 1 != header.ents.len() {
     return Err(anyhow!("manifest name count does not match TOC"));
@@ -90,12 +127,6 @@ fn load(in_file: PathBuf) -> Result<Loaded> {
         .ok_or_else(|| anyhow!("TOC MD5 {} is absent from manifest", entry.name_md5))
     })
     .collect::<Result<Vec<_>>>()?;
-
-  let profile = if is_orbis_ps4 {
-    "orbis_ps4"
-  } else {
-    "ps3"
-  };
   let compressed = |entry: &Ent| {
     if entry.unc_len == 0 {
       return false;
@@ -114,6 +145,7 @@ fn load(in_file: PathBuf) -> Result<Loaded> {
     .zip(&header.ents[1..])
     .map(|(name, entry)| (name.as_str(), compressed(entry)))
     .collect::<HashMap<_, _>>();
+
   let mut data_order = header.ents[1..].iter().zip(&names).collect::<Vec<_>>();
   data_order.sort_by_key(|(entry, _)| entry.blk_off);
 
@@ -136,7 +168,7 @@ fn load(in_file: PathBuf) -> Result<Loaded> {
   let compression_enabled =
     manifest_compressed || files.iter().any(|file| file.compressed == Some(true));
   let recipe = ManiJson {
-    profile: Some(profile.to_owned()),
+    profile: Some(profile.name().to_owned()),
     ver_maj: header.v_maj,
     ver_min: header.v_min,
     compression: header.compr.name().to_owned(),
@@ -148,10 +180,10 @@ fn load(in_file: PathBuf) -> Result<Loaded> {
     absolute: Some(header.abspath),
     dedup: Some(false),
     compress_manifest: Some(manifest_compressed),
-    sort_toc: is_orbis_ps4.then_some(header.flags & 0x04 != 0),
-    sort_manifest: is_orbis_ps4.then_some(header.flags & 0x08 != 0),
-    file_align_size: Some(if is_orbis_ps4 { 2097152 } else { 65536 }),
-    file_alignment: Some(if is_orbis_ps4 { 65536 } else { 8192 }),
+    sort_toc: profile.is_orbis().then_some(header.flags & 0x04 != 0),
+    sort_manifest: profile.is_orbis().then_some(header.flags & 0x08 != 0),
+    file_align_size: Some(if profile.is_orbis() { 2097152 } else { 65536 }),
+    file_alignment: Some(if profile.is_orbis() { 65536 } else { 8192 }),
     files,
   };
   Ok(Loaded {
@@ -159,18 +191,17 @@ fn load(in_file: PathBuf) -> Result<Loaded> {
     header,
     bss,
     names,
-    is_orbis_ps4,
+    profile,
     recipe,
   })
 }
 
 pub fn inspect(in_file: PathBuf) -> Result<()> {
-  let loaded = load(in_file)?;
+  let loaded = load(in_file, None)?;
   let header = &loaded.header;
-  let profile = if loaded.is_orbis_ps4 {
-    "orbis_ps4 (likely)"
-  } else {
-    "ps3 (likely)"
+  let profile = match loaded.profile {
+    Profile::OrbisPs4 => "orbis_ps4 (likely)",
+    Profile::Ps3 => "ps3 (likely)",
   };
   println!("Profile: {profile}");
   println!(
@@ -184,13 +215,18 @@ pub fn inspect(in_file: PathBuf) -> Result<()> {
   Ok(())
 }
 
-pub fn export_json(in_file: PathBuf, out_json: PathBuf) -> Result<()> {
-  let loaded = load(in_file)?;
+pub fn export_json(in_file: PathBuf, out_json: PathBuf, profile: Option<String>) -> Result<()> {
+  let loaded = load(in_file, profile.as_deref())?;
   File::create(out_json)?.write_all(&serde_json::to_vec_pretty(&loaded.recipe)?)?;
   Ok(())
 }
 
-pub fn extract(in_file: PathBuf, out_dir: PathBuf, list_only: bool) -> Result<()> {
+pub fn extract(
+  in_file: PathBuf,
+  out_dir: PathBuf,
+  list_only: bool,
+  profile: Option<String>,
+) -> Result<()> {
   let Loaded {
     mut file,
     header: hdr,
@@ -198,7 +234,7 @@ pub fn extract(in_file: PathBuf, out_dir: PathBuf, list_only: bool) -> Result<()
     names,
     recipe,
     ..
-  } = load(in_file)?;
+  } = load(in_file, profile.as_deref())?;
 
   println!(
     "PSAR version {}.{}, {} files",

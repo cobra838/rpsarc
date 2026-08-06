@@ -30,7 +30,12 @@ struct PreA {
 pub fn create(in_json: PathBuf, out_file: PathBuf) -> Result<()> {
   let json_text = fs::read_to_string(&in_json)?;
   let json: ManiJson = serde_json::from_str(json_text.as_str())?;
-  let is_orbis_ps4 = json.profile.as_deref() == Some("orbis_ps4");
+  let is_orbis_ps4 = match json.profile.as_deref() {
+    Some("orbis_ps4") => true,
+    Some("ps3") | None => false,
+    Some("unknown") => return Err(anyhow!("manifest profile is unknown; recreate the JSON with rpsarc x/j --profile ps3 or --profile orbis_ps4")),
+    Some(profile) => return Err(anyhow!("unknown manifest profile {profile}")),
+  };
   let v_maj = json.ver_maj;
   let v_min = json.ver_min;
 

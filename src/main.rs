@@ -28,6 +28,9 @@ enum Cmd {
   },
   /// Export a JSON recipe without extracting files
   J {
+    /// Override auto-detection for the JSON recipe: ps3 or orbis_ps4
+    #[arg(long)]
+    profile: Option<String>,
     /// Input PSAR file
     in_file: PathBuf,
     /// Output JSON file
@@ -35,6 +38,9 @@ enum Cmd {
   },
   /// Extract archive, creating a manifest json for recreating
   X {
+    /// Override auto-detection for the JSON recipe: ps3 or orbis_ps4
+    #[arg(long)]
+    profile: Option<String>,
     /// Input PSAR file
     in_file: PathBuf,
     /// Output directory
@@ -51,10 +57,10 @@ enum Cmd {
 
 fn main() -> Result<()> {
   match Cli::parse().command {
-    Cmd::L { in_file } => cmd_extract::extract(in_file, PathBuf::new(), true),
+    Cmd::L { in_file } => cmd_extract::extract(in_file, PathBuf::new(), true, None),
     Cmd::I { in_file } => cmd_extract::inspect(in_file),
-    Cmd::J { in_file, out_json } => cmd_extract::export_json(in_file, out_json),
-    Cmd::X { in_file, out_dir } => cmd_extract::extract(in_file, out_dir, false),
+    Cmd::J { profile, in_file, out_json } => cmd_extract::export_json(in_file, out_json, profile),
+    Cmd::X { profile, in_file, out_dir } => cmd_extract::extract(in_file, out_dir, false, profile),
     Cmd::C { in_json, out_file } => cmd_create::create(in_json, out_file),
   }
 }
