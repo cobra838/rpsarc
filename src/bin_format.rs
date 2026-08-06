@@ -1,6 +1,5 @@
 use anyhow::{Result, anyhow};
 use binrw::binrw;
-use flate2::{Compression, read::ZlibDecoder, write::ZlibEncoder};
 use std::{
   fmt::Display,
   io::{Read, Write},
@@ -56,23 +55,14 @@ impl Comp {
 
   pub fn dec(&self, i: &[u8], l: usize) -> Option<Vec<u8>> {
     match self {
-      Comp::Zlib => {
-        let mut decoder = ZlibDecoder::new(i);
-        let mut out = Vec::with_capacity(l);
-        decoder.read_to_end(&mut out).ok()?;
-        Some(out)
-      }
+      Comp::Zlib => crate::zlib123::decompress(i, l),
       Comp::Lzma => todo!(),
     }
   }
 
   pub fn com(&self, i: &[u8], l: u32) -> Result<Vec<u8>> {
     match self {
-      Comp::Zlib => {
-        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::new(l));
-        encoder.write_all(i)?;
-        Ok(encoder.finish()?)
-      }
+      Comp::Zlib => crate::zlib123::compress(i, l),
       Comp::Lzma => todo!(),
     }
   }
