@@ -1,11 +1,17 @@
 use serde::{Deserialize, Serialize};
 
+/// A build recipe
 #[derive(Serialize, Deserialize)]
-pub struct ManiJson<'a> {
+pub struct ManiJson {
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub profile: Option<String>,
   pub ver_maj: u16,
   pub ver_min: u16,
-  pub compression: &'a str,
-  pub compr_level: i32,
+  pub compression: String,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub compression_enabled: Option<bool>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub compression_level: Option<u32>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub force_comp: Option<bool>,
   #[serde(skip_serializing_if = "Option::is_none")]
@@ -16,16 +22,24 @@ pub struct ManiJson<'a> {
   pub absolute: Option<bool>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub dedup: Option<bool>,
-  pub files: Vec<ManiFile<'a>>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub compress_manifest: Option<bool>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub file_align_size: Option<u64>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub file_alignment: Option<u32>,
+  pub files: Vec<ManiFile>,
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct ManiFile<'a> {
-  pub path: &'a str,
+pub struct ManiFile {
+  pub path: String,
   #[serde(skip_serializing_if = "Option::is_none")]
-  pub name: Option<&'a str>,
+  pub name: Option<String>,
   #[serde(skip_serializing_if = "Option::is_none")]
-  pub compr_level: Option<i32>,
+  pub compressed: Option<bool>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub compression_level: Option<u32>,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub force_comp: Option<bool>,
 }

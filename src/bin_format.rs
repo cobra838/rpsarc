@@ -1,10 +1,10 @@
 use anyhow::{Result, anyhow};
 use binrw::binrw;
+use flate2::{Compression, read::ZlibDecoder, write::ZlibEncoder};
 use std::{
   fmt::Display,
   io::{Read, Write},
 };
-use zenflate::Unstoppable;
 
 #[binrw]
 #[brw(big, magic = b"PSAR")]
@@ -21,9 +21,12 @@ pub struct Info {
   pub ents_cnt: u32,
   #[brw(assert(blk_size.is_power_of_two(), "blk_size ({blk_size}) must be a power of two"))]
   pub blk_size: u32,
-  #[br(temp, assert(fl <= 0b11, "unknown flag bits {fl:b}"))]
-  #[bw(calc(if *igncase {0b01} else {0} + if *abspath {0b10} else {0}))]
+  #[br(temp)]
+  #[bw(calc(*flags))]
   pub fl: u32,
+  #[br(calc(fl))]
+  #[bw(ignore)]
+  pub flags: u32,
   #[br(calc(fl & 0b01 != 0))]
   #[bw(ignore)]
   pub igncase: bool,
@@ -54,13 +57,9 @@ impl Comp {
   pub fn dec(&self, i: &[u8], l: usize) -> Option<Vec<u8>> {
     match self {
       Comp::Zlib => {
-        let mut out = vec![0u8; l];
-        let mut dor = zenflate::Decompressor::new();
-        let size = dor
-          .zlib_decompress(i, &mut out, Unstoppable)
-          .ok()?
-          .output_written;
-        out.resize(size, 0);
+        let mut decoder = ZlibDecoder::new(i);
+        let mut out = Vec::with_capacity(l);
+        decoder.read_to_end(&mut out).ok()?;
         Some(out)
       }
       Comp::Lzma => todo!(),
@@ -68,14 +67,11 @@ impl Comp {
   }
 
   pub fn com(&self, i: &[u8], l: u32) -> Result<Vec<u8>> {
-    let mut out = vec![0u8; i.len()];
-
     match self {
       Comp::Zlib => {
-        let mut cor = zenflate::Compressor::new(zenflate::CompressionLevel::new(l));
-        let got = cor.zlib_compress(i, &mut out, Unstoppable)?;
-        out.resize(got, 0);
-        Ok(out)
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::new(l));
+        encoder.write_all(i)?;
+        Ok(encoder.finish()?)
       }
       Comp::Lzma => todo!(),
     }
@@ -136,8 +132,8 @@ impl BssType {
     }
   }
 
-  pub fn read<R: Read>(&self, r: &mut R, blk_size: u32) -> Result<Vec<u32>> {
-    let mut v = match *self {
+  pub fn read_raw<R: Read>(&self, r: &mut R) -> Result<Vec<u32>> {
+    let v = match *self {
       Self::U8(n) => {
         let mut b = vec![0u8; n as usize];
         let mut v = vec![0u32; n as usize];
@@ -170,11 +166,6 @@ impl BssType {
         v
       }
     };
-    for vb in &mut v {
-      if *vb == 0 {
-        *vb = blk_size;
-      }
-    }
     Ok(v)
   }
 
@@ -202,6 +193,18 @@ impl BssType {
       }
     }
     Ok(())
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::BssType;
+
+  #[test]
+  fn zsize_full_raw_block_is_encoded_as_zero() {
+    let mut bytes = Vec::new();
+    BssType::U16(1).write(&mut bytes, &[65536]).unwrap();
+    assert_eq!(bytes, [0, 0]);
   }
 }
 

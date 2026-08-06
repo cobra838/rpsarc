@@ -8,14 +8,140 @@ use md5::Digest;
 use parseq::ParallelIterator;
 use std::{
   fs::{File, create_dir_all},
-  io::{BufWriter, Read, Seek, SeekFrom, Write},
+  io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write},
   path::PathBuf,
 };
 
-pub fn extract(in_file: PathBuf, out_dir: PathBuf, list_only: bool) -> Result<()> {
+struct Loaded {
+  file: BufReader<File>,
+  header: Info,
+  bss: Vec<u32>,
+  names: Vec<String>,
+  recipe: ManiJson,
+}
+
+fn load(in_file: PathBuf) -> Result<Loaded> {
   let mut file = File::open_buffered(in_file)?;
-  let hdr = Info::read(&mut file)?;
-  let bss = BssType::from_info(&hdr)?.read(&mut file, hdr.blk_size)?;
+  let header = Info::read(&mut file)?;
+  let bss_raw = BssType::from_info(&header)?.read_raw(&mut file)?;
+  let bss = bss_raw
+    .iter()
+    .map(|&v| if v == 0 { header.blk_size } else { v })
+    .collect::<Vec<_>>();
+  let entry = &header.ents[0];
+  let blocks = entry.unc_len.div_ceil(header.blk_size as u64).max(1) as usize;
+  let mut bytes = Vec::with_capacity(entry.unc_len as usize);
+  file.seek(SeekFrom::Start(entry.blk_off))?;
+  for &size in &bss[entry.blk_idx as usize..entry.blk_idx as usize + blocks] {
+    let mut block = vec![0; size as usize];
+    file.read_exact(&mut block)?;
+    bytes.extend(
+      header
+        .compr
+        .dec(&block, header.blk_size as usize)
+        .unwrap_or(block),
+    );
+  }
+  bytes.truncate(entry.unc_len as usize);
+  let names = String::from_utf8(bytes)?
+    .split('\n')
+    .map(str::to_owned)
+    .collect::<Vec<_>>();
+  if names.len() + 1 != header.ents.len() {
+    return Err(anyhow!("manifest name count does not match TOC"));
+  }
+  let profile = if header.flags & 0x0C != 0 {
+    "orbis_ps4"
+  } else {
+    "ps3"
+  };
+  let compressed = |entry: &Ent| {
+    if entry.unc_len == 0 {
+      return false;
+    }
+    let mut remaining = entry.unc_len;
+    (0..entry.unc_len.div_ceil(header.blk_size as u64).max(1) as usize).any(|i| {
+      let expected = remaining.min(header.blk_size as u64) as u32;
+      remaining -= expected as u64;
+      let stored = bss_raw[entry.blk_idx as usize + i];
+      (if stored == 0 { header.blk_size } else { stored }) != expected
+    })
+  };
+  let manifest_compressed = compressed(&header.ents[0]);
+  let files = names
+    .iter()
+    .zip(&header.ents[1..])
+    .map(|(name, entry)| ManiFile {
+      path: name.strip_prefix('/').unwrap_or(name).to_owned(),
+      name: None,
+      compressed: Some(compressed(entry)),
+      compression_level: None,
+      force_comp: None,
+    })
+    .collect::<Vec<_>>();
+
+  let compression_enabled =
+    manifest_compressed || files.iter().any(|file| file.compressed == Some(true));
+  let recipe = ManiJson {
+    profile: Some(profile.to_owned()),
+    ver_maj: header.v_maj,
+    ver_min: header.v_min,
+    compression: header.compr.name().to_owned(),
+    compression_enabled: Some(compression_enabled),
+    compression_level: Some(9),
+    force_comp: None,
+    block_size: Some(header.blk_size),
+    ignorecase: Some(header.igncase),
+    absolute: Some(header.abspath),
+    dedup: Some(false),
+    compress_manifest: Some(manifest_compressed),
+    file_align_size: Some(65536),
+    file_alignment: Some(8192),
+    files,
+  };
+  Ok(Loaded {
+    file,
+    header,
+    bss,
+    names,
+    recipe,
+  })
+}
+
+pub fn inspect(in_file: PathBuf) -> Result<()> {
+  let loaded = load(in_file)?;
+  let header = &loaded.header;
+  let profile = if header.flags & 0x0C != 0 {
+    "orbis_ps4 (likely)"
+  } else {
+    "ps3 (likely)"
+  };
+  println!("Profile: {profile}");
+  println!(
+    "PSAR {}.{}, {}, block size {}, flags 0x{:08X}",
+    header.v_maj,
+    header.v_min,
+    header.compr.name(),
+    header.blk_size,
+    header.flags
+  );
+  Ok(())
+}
+
+pub fn export_json(in_file: PathBuf, out_json: PathBuf) -> Result<()> {
+  let loaded = load(in_file)?;
+  File::create(out_json)?.write_all(&serde_json::to_vec_pretty(&loaded.recipe)?)?;
+  Ok(())
+}
+
+pub fn extract(in_file: PathBuf, out_dir: PathBuf, list_only: bool) -> Result<()> {
+  let Loaded {
+    mut file,
+    header: hdr,
+    bss,
+    names,
+    recipe,
+  } = load(in_file)?;
 
   println!(
     "PSAR version {}.{}, {} files",
@@ -30,41 +156,35 @@ pub fn extract(in_file: PathBuf, out_dir: PathBuf, list_only: bool) -> Result<()
     hdr.igncase, hdr.abspath
   );
 
-  let manifest = {
-    let &Ent {
-      name_md5: _,
-      blk_idx,
-      unc_len,
-      blk_off,
-    } = &hdr.ents[0];
-    let bl = blk_idx as usize;
-    let br = bl + unc_len.div_ceil(hdr.blk_size as u64) as usize;
-    let mut dat = Vec::with_capacity(unc_len.try_into()?);
-    file.seek(SeekFrom::Start(blk_off))?;
-    for &bs in &bss[bl..br] {
-      let mut blk = vec![0u8; bs as usize];
-      file.read_exact(&mut blk)?;
-      dat.extend(hdr.compr.dec(&blk, hdr.blk_size as usize).unwrap_or(blk));
-    }
-    String::from_utf8(dat)?
-  };
-
-  let namelist = {
-    let mut ss = Vec::with_capacity(hdr.ents.len());
-    ss.push("__manifest.txt");
-    ss.extend(manifest.lines().map(|s| s.strip_prefix('/').unwrap_or(s)));
-    if ss.len() < hdr.ents.len() {
-      return Err(anyhow!("not enough lines in manifest file"));
-    }
-    ss
-  };
+  let mut namelist = Vec::with_capacity(hdr.ents.len());
+  namelist.push("__manifest.txt".to_owned());
+  namelist.extend(
+    names
+      .into_iter()
+      .map(|name| name.strip_prefix('/').unwrap_or(&name).to_owned()),
+  );
 
   if list_only {
-    for (i, (e, name)) in hdr.ents.iter().zip(namelist).enumerate() {
+    for (entry, name) in hdr.ents[1..].iter().zip(&namelist[1..]) {
+      let blocks = entry.unc_len.div_ceil(hdr.blk_size as u64).max(1) as usize;
+      let stored = if entry.unc_len == 0 {
+        0
+      } else {
+        bss[entry.blk_idx as usize..entry.blk_idx as usize + blocks]
+          .iter()
+          .map(|&size| size as u64)
+          .sum()
+      };
+      let percent = if entry.unc_len == 0 {
+        100
+      } else {
+        stored * 100 / entry.unc_len
+      };
       println!(
-        "[{i:5}] name_md5={:x} length={:9} : {name}",
-        Digest(e.name_md5.0),
-        e.unc_len
+        "name_md5={:x} : {name} ({stored}/{}/{}%)",
+        Digest(entry.name_md5.0),
+        entry.unc_len,
+        percent
       );
     }
     return Ok(());
@@ -74,7 +194,7 @@ pub fn extract(in_file: PathBuf, out_dir: PathBuf, list_only: bool) -> Result<()
 
   for i in empty_files {
     println!("empty file {}", namelist[i]);
-    let p = out_dir.join(namelist[i]);
+    let p = out_dir.join(&namelist[i]);
     if let Some(par) = p.parent() {
       create_dir_all(par)?;
     }
@@ -115,7 +235,7 @@ pub fn extract(in_file: PathBuf, out_dir: PathBuf, list_only: bool) -> Result<()
       match f {
         Some(w) => w.write_all(&dat)?,
         None => {
-          let p = out_dir.join(namelist[i]);
+          let p = out_dir.join(&namelist[i]);
           println!("{} <- {}", p.display(), namelist[i]);
           if let Some(par) = p.parent() {
             create_dir_all(par)?;
@@ -137,28 +257,8 @@ pub fn extract(in_file: PathBuf, out_dir: PathBuf, list_only: bool) -> Result<()
     f.flush()?;
   }
 
-  File::create(out_dir.join("__manifest.json"))?.write_all(&serde_json::to_vec_pretty(
-    &ManiJson {
-      ver_maj: hdr.v_maj, //
-      ver_min: hdr.v_min,
-      compression: hdr.compr.name(),
-      compr_level: 16,
-      force_comp: Some(false),
-      block_size: Some(hdr.blk_size),
-      ignorecase: Some(hdr.igncase),
-      absolute: Some(hdr.abspath),
-      dedup: Some(true),
-      files: namelist[1..]
-        .iter()
-        .map(|path| ManiFile {
-          path, //
-          name: None,
-          compr_level: None,
-          force_comp: None,
-        })
-        .collect(),
-    },
-  )?)?;
+  File::create(out_dir.join("__manifest.json"))?
+      .write_all(&serde_json::to_vec_pretty(&recipe)?)?;
 
   Ok(())
 }
@@ -177,9 +277,7 @@ fn calc_blocks_info(
   ents: Vec<Ent>,
   blk_size: u32,
 ) -> Result<(Vec<BlkInfo>, Vec<usize>)> {
-  let mut infos = Vec::with_capacity(bss.len());
-
-  bss
+  let mut infos = bss
     .into_iter()
     .map(|len| BlkInfo {
       off: 0,
@@ -188,7 +286,7 @@ fn calc_blocks_info(
       f_write: vec![],
       f_close: vec![],
     })
-    .collect_into(&mut infos);
+    .collect::<Vec<_>>();
 
   let mut empty = vec![];
 
@@ -202,6 +300,10 @@ fn calc_blocks_info(
     },
   ) in ents.into_iter().enumerate()
   {
+    // Entry 0 is the internal PSARC filename manifest. It is parsed into __manifest.json and is not an extracted user file.
+    if i == 0 {
+      continue;
+    }
     let bl = blk_idx as usize;
     let br = (bl as u64 + unc_len.div_ceil(blk_size as u64).max(1)).try_into()?;
     let mut fp = blk_off;
@@ -249,11 +351,7 @@ fn calc_blocks_info(
     }
   }
 
-  for (i, bi) in infos.iter().enumerate() {
-    if bi.off == 0 {
-      return Err(anyhow!("block #{i} doesn't have an offset"));
-    }
-  }
-
+  // The internal manifest and alignment padding can leave ZSize entries with no extracted file block.
+  infos.retain(|bi| bi.off != 0);
   Ok((infos, empty))
 }

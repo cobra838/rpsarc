@@ -28,6 +28,16 @@ struct PreA {
 pub fn create(in_json: PathBuf, out_file: PathBuf) -> Result<()> {
   let json_text = fs::read_to_string(&in_json)?;
   let json: ManiJson = serde_json::from_str(json_text.as_str())?;
+  if json.profile.as_deref() == Some("orbis_ps4") {
+    return Err(anyhow!("orbis_ps4 writer is not implemented yet"));
+  }
+  if matches!(json.profile.as_deref(), None | Some("ps3"))
+    && !json.compress_manifest.unwrap_or(false)
+    && !json.dedup.unwrap_or(false)
+    && (!json.compression_enabled.unwrap_or(true) || json.files.iter().all(|file| file.compressed == Some(false)))
+  {
+    return create_raw_regular(&json, in_json, out_file);
+  }
   let v_maj = json.ver_maj;
   let v_min = json.ver_min;
 
@@ -38,13 +48,18 @@ pub fn create(in_json: PathBuf, out_file: PathBuf) -> Result<()> {
     json.files.len()
   );
 
-  let comp = match json.compression {
+  let comp = match json.compression.as_str() {
     "zlib" => Comp::Zlib,
     "lzma" => Comp::Lzma,
     s => return Err(anyhow!("unknown compression {s}")),
   };
 
-  let c_level = json.compr_level;
+  let compression_enabled = json.compression_enabled.unwrap_or(true);
+  let c_level = json.compression_level.unwrap_or(9);
+  if !(1..=9).contains(&c_level) {
+    return Err(anyhow!("compression_level {c_level} must be in 1..=9"));
+  }
+  let c_level = if compression_enabled { c_level as i32 } else { -1 };
   let c_force = json.force_comp.unwrap_or(false);
   println!(
     "- compression: {} level {}, force: {}",
@@ -72,16 +87,16 @@ pub fn create(in_json: PathBuf, out_file: PathBuf) -> Result<()> {
       path: PathBuf::from_str("manifest").unwrap(),
       name_md5: md5::Digest([0u8; 16]),
       unc_len: 0,
-      c_force,
-      c_level,
+      c_force: if json.compress_manifest.unwrap_or(false) { c_force } else { false },
+      c_level: if compression_enabled && json.compress_manifest.unwrap_or(false) { c_level } else { -1 },
       n_blk: 0,
     });
 
     let in_dir = in_json.parent().unwrap_or_else(|| Path::new("."));
 
     for (i, mf) in json.files.iter().enumerate() {
-      let mf_path = in_dir.join(mf.path);
-      let mf_name = match mf.name {
+      let mf_path = in_dir.join(&mf.path);
+      let mf_name = match mf.name.as_deref() {
         Some(s) => s.to_string(),
         None => {
           let r = mf_path.relative_to(in_dir)?;
@@ -125,7 +140,7 @@ pub fn create(in_json: PathBuf, out_file: PathBuf) -> Result<()> {
         name_md5,
         unc_len,
         c_force: mf.force_comp.unwrap_or(c_force),
-        c_level: mf.compr_level.unwrap_or(c_level),
+        c_level: if mf.compressed == Some(false) { -1 } else { mf.compression_level.unwrap_or(c_level as u32) as i32 },
         n_blk: unc_len.div_ceil(blk_size as u64).max(1).try_into()?,
       });
     }
@@ -311,6 +326,7 @@ pub fn create(in_json: PathBuf, out_file: PathBuf) -> Result<()> {
     compr: comp,
     info_len,
     blk_size,
+    flags: (if igncase { 1 } else { 0 }) | (if abspath { 2 } else { 0 }),
     igncase,
     abspath,
     ents,
@@ -322,4 +338,94 @@ pub fn create(in_json: PathBuf, out_file: PathBuf) -> Result<()> {
   out_file.flush()?;
 
   err.into_inner()
+}
+
+fn create_raw_regular(json: &ManiJson, in_json: PathBuf, out_path: PathBuf) -> Result<()> {
+  let block_size = json.block_size.unwrap_or(65536);
+  let alignment = json.file_alignment.unwrap_or(8192) as u64;
+  let align_size = json.file_align_size.unwrap_or(65536);
+  if !block_size.is_power_of_two() || !alignment.is_power_of_two() {
+    return Err(anyhow!("block_size and file_alignment must be powers of two"));
+  }
+  let absolute = json.absolute.unwrap_or(false);
+  let ignorecase = json.ignorecase.unwrap_or(false);
+  let input_dir = in_json.parent().unwrap_or_else(|| Path::new("."));
+  let mut files = Vec::with_capacity(json.files.len());
+  let mut names = Vec::with_capacity(json.files.len());
+  for file in &json.files {
+    let path = input_dir.join(&file.path);
+    let name = match file.name.as_deref() {
+      Some(name) => name.to_owned(),
+      None => {
+        let mut name = path.relative_to(input_dir)?.into_string();
+        if absolute && !name.starts_with('/') { name.insert(0, '/'); }
+        name
+      }
+    };
+    files.push((path, metadata(input_dir.join(&file.path))?.len()));
+    names.push(name);
+  }
+  let manifest = names.join("\n").into_bytes();
+  let data_blocks = manifest.len().div_ceil(block_size as usize).max(1)
+    + files.iter().map(|(_, size)| size.div_ceil(block_size as u64).max(1) as usize).sum::<usize>();
+  let mut zcount = data_blocks;
+  let info_len;
+  loop {
+    let candidate = 32u64 + (files.len() as u64 + 1) * 30 + (zcount as u64 * 2);
+    let mut pos = candidate + manifest.len() as u64;
+    let mut next_count = data_blocks;
+    for (_, size) in &files {
+      if *size >= align_size {
+        let pad = (alignment - pos % alignment) % alignment;
+        next_count += 1;
+        pos += pad;
+      }
+      pos += *size;
+    }
+    if next_count == zcount { info_len = candidate; break; }
+    zcount = next_count;
+  }
+  let mut zsizes = Vec::with_capacity(zcount);
+  let mut entries = Vec::with_capacity(files.len() + 1);
+  let mut offsets = Vec::with_capacity(files.len());
+  let mut pos = info_len;
+  let manifest_idx = zsizes.len() as u32;
+  push_raw_zsizes(&mut zsizes, manifest.len() as u64, block_size);
+  entries.push(Ent { name_md5: NameMd5([0; 16]), blk_idx: manifest_idx, unc_len: manifest.len() as u64, blk_off: pos });
+  pos += manifest.len() as u64;
+  for ((path, size), name) in files.iter().zip(&names) {
+    if *size >= align_size {
+      let pad = (alignment - pos % alignment) % alignment;
+      zsizes.push(pad as u32);
+      pos += pad;
+    }
+    let idx = zsizes.len() as u32;
+    push_raw_zsizes(&mut zsizes, *size, block_size);
+    let hash = if ignorecase { name.to_ascii_uppercase() } else { name.clone() };
+    entries.push(Ent { name_md5: NameMd5(md5::compute(hash).0), blk_idx: idx, unc_len: *size, blk_off: pos });
+    offsets.push((path, pos));
+    pos += *size;
+  }
+  let bss = BssType::from_blksz_cnt(block_size, zsizes.len() as u32);
+  if info_len != 32 + (entries.len() as u64 * 30) + bss.len().unwrap() as u64 { return Err(anyhow!("alignment table did not converge")); }
+  let mut output = File::create(&out_path)?;
+  Info { v_maj: json.ver_maj, v_min: json.ver_min, compr: Comp::Zlib, info_len: info_len as u32, blk_size: block_size, flags: (if ignorecase {1}else{0}) | (if absolute {2}else{0}), igncase: ignorecase, abspath: absolute, ents: entries }.write(&mut output)?;
+  bss.write(&mut output, &zsizes)?;
+  output.write_all(&manifest)?;
+  let mut at = info_len + manifest.len() as u64;
+  for (path, offset) in offsets {
+    while at < offset { output.write_all(&[0])?; at += 1; }
+    let written = std::io::copy(&mut File::open(path)?, &mut output)?;
+    at += written;
+  }
+  Ok(())
+}
+
+fn push_raw_zsizes(out: &mut Vec<u32>, size: u64, block_size: u32) {
+  let mut remaining = size;
+  for _ in 0..size.div_ceil(block_size as u64).max(1) {
+    let part = remaining.min(block_size as u64) as u32;
+    out.push(if part == block_size { 0 } else { part });
+    remaining -= part as u64;
+  }
 }

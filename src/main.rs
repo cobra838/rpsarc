@@ -1,4 +1,4 @@
-#![feature(file_buffered, read_array, iter_collect_into, try_blocks)]
+#![feature(file_buffered, read_array, try_blocks)]
 
 mod bin_format;
 mod cmd_create;
@@ -21,6 +21,18 @@ enum Cmd {
     /// Input PSAR file
     in_file: PathBuf,
   },
+  /// Inspect header and likely writer profile
+  I {
+    /// Input PSAR file
+    in_file: PathBuf,
+  },
+  /// Export a JSON recipe without extracting files
+  J {
+    /// Input PSAR file
+    in_file: PathBuf,
+    /// Output JSON file
+    out_json: PathBuf,
+  },
   /// Extract archive, creating a manifest json for recreating
   X {
     /// Input PSAR file
@@ -40,6 +52,8 @@ enum Cmd {
 fn main() -> Result<()> {
   match Cli::parse().command {
     Cmd::L { in_file } => cmd_extract::extract(in_file, PathBuf::new(), true),
+    Cmd::I { in_file } => cmd_extract::inspect(in_file),
+    Cmd::J { in_file, out_json } => cmd_extract::export_json(in_file, out_json),
     Cmd::X { in_file, out_dir } => cmd_extract::extract(in_file, out_dir, false),
     Cmd::C { in_json, out_file } => cmd_create::create(in_json, out_file),
   }
