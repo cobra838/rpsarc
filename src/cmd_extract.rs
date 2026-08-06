@@ -7,7 +7,7 @@ use binrw::BinRead;
 use md5::Digest;
 use parseq::ParallelIterator;
 use std::{
-  collections::HashMap,
+  collections::{HashMap, HashSet},
   fs::{File, create_dir_all},
   io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write},
   path::PathBuf,
@@ -26,7 +26,6 @@ struct Loaded {
 enum Profile {
   Ps3,
   OrbisPs4,
-  Unknown,
 }
 
 impl Profile {
@@ -34,7 +33,6 @@ impl Profile {
     match self {
       Self::Ps3 => "ps3",
       Self::OrbisPs4 => "orbis_ps4",
-      Self::Unknown => "unknown",
     }
   }
 
@@ -51,8 +49,7 @@ fn detect_profile(header: &Info, manifest: &str) -> Profile {
   } else if manifest.contains('\n') {
     Profile::Ps3
   } else {
-    // A one-name manifest with flags 0x00 has no on-disk discriminator.
-    Profile::Unknown
+    Profile::Ps3
   }
 }
 

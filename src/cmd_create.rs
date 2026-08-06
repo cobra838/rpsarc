@@ -33,7 +33,6 @@ pub fn create(in_json: PathBuf, out_file: PathBuf) -> Result<()> {
   let is_orbis_ps4 = match json.profile.as_deref() {
     Some("orbis_ps4") => true,
     Some("ps3") | None => false,
-    Some("unknown") => return Err(anyhow!("manifest profile is unknown; recreate the JSON with rpsarc x/j --profile ps3 or --profile orbis_ps4")),
     Some(profile) => return Err(anyhow!("unknown manifest profile {profile}")),
   };
   let v_maj = json.ver_maj;
