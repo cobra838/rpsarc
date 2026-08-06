@@ -184,11 +184,20 @@ fn load(in_file: PathBuf, profile_override: Option<&str>) -> Result<Loaded> {
   let mut data_order = header.ents[1..].iter().zip(&names).collect::<Vec<_>>();
   data_order.sort_by_key(|(entry, _)| entry.blk_off);
 
-  // Keep files in physical PSARC order, sorted by entry Offset.
-  let files = data_order
+  let file_names = if profile.is_orbis() && header.flags & 0x08 != 0 {
+    // A sorted Orbis manifest loses archive input order; use physical order.
+    data_order
+      .into_iter()
+      .map(|(_, name)| name)
+      .collect::<Vec<_>>()
+  } else {
+    // An unsorted manifest preserves input and dedup order.
+    manifest_names.iter().collect::<Vec<_>>()
+  };
+  let files = file_names
     .into_iter()
-    .map(|(_, name)| ManiFile {
-      path: name.strip_prefix('/').unwrap_or(name).to_owned(),
+    .map(|name| ManiFile {
+      path: name.strip_prefix('/').unwrap_or(&name).to_owned(),
       name: None,
       compressed: Some(
         *stored_by_name

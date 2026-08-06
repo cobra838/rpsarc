@@ -175,7 +175,7 @@ pub fn create(in_json: PathBuf, out_file: PathBuf) -> Result<()> {
       manifest_names.sort_unstable();
     }
 
-    let manifest = if is_orbis_ps4 {
+    let manifest = if is_orbis_ps4 && json.sort_manifest.unwrap_or(true) {
       manifest_names.join("\0")
     } else {
       manifest_names.join("\n")
