@@ -175,6 +175,12 @@ fn load(in_file: PathBuf, profile_override: Option<&str>) -> Result<Loaded> {
     })
   };
   let manifest_compressed = compressed(&header.ents[0]);
+
+  let mut used_blocks = HashSet::with_capacity(header.ents.len() - 1);
+  let dedup = header.ents[1..]
+    .iter()
+    .any(|entry| !used_blocks.insert((entry.blk_idx, entry.blk_off)));
+
   let stored_by_name = names
     .iter()
     .zip(&header.ents[1..])
@@ -222,7 +228,7 @@ fn load(in_file: PathBuf, profile_override: Option<&str>) -> Result<Loaded> {
     block_size: Some(header.blk_size),
     ignorecase: Some(header.igncase),
     absolute: Some(header.abspath),
-    dedup: Some(false),
+    dedup: Some(dedup),
     compress_manifest: Some(manifest_compressed),
     sort_toc: profile.is_orbis().then_some(header.flags & 0x04 != 0),
     sort_manifest: profile.is_orbis().then_some(header.flags & 0x08 != 0),
