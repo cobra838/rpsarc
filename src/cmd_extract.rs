@@ -369,7 +369,12 @@ pub fn extract(
       }
     })
     .map_parallel(move |(blk, bi)| {
-      let dat = comp.dec(&blk, bi.unc_len as usize).unwrap_or(blk);
+      // A block whose stored and uncompressed sizes match is raw. Do not feed it to zlib: arbitrary raw bytes can otherwise be accepted as an empty/partial zlib stream and silently extract as zero bytes.
+      let dat = if bi.len == bi.unc_len {
+        blk
+      } else {
+        comp.dec(&blk, bi.unc_len as usize).unwrap_or(blk)
+      };
       (dat, bi.f_write, bi.f_close)
     })
   {
