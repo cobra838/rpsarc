@@ -41,6 +41,9 @@ enum Cmd {
     /// Override auto-detection for the JSON recipe: ps3 or orbis_ps4
     #[arg(long)]
     profile: Option<String>,
+    /// Extract only a path, directory, or extension glob (repeatable)
+    #[arg(long, value_name = "PATH_OR_GLOB")]
+    include: Vec<String>,
     /// Input PSAR file
     in_file: PathBuf,
     /// Output directory
@@ -57,10 +60,10 @@ enum Cmd {
 
 fn main() -> Result<()> {
   match Cli::parse().command {
-    Cmd::L { in_file } => cmd_extract::extract(in_file, PathBuf::new(), true, None),
+    Cmd::L { in_file } => cmd_extract::extract(in_file, PathBuf::new(), true, None, vec![]),
     Cmd::I { in_file } => cmd_extract::inspect(in_file),
     Cmd::J { profile, in_file, out_json } => cmd_extract::export_json(in_file, out_json, profile),
-    Cmd::X { profile, in_file, out_dir } => cmd_extract::extract(in_file, out_dir, false, profile),
+    Cmd::X { profile, include, in_file, out_dir } => cmd_extract::extract(in_file, out_dir, false, profile, include),
     Cmd::C { in_json, out_file } => cmd_create::create(in_json, out_file),
   }
 }

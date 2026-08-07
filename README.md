@@ -16,6 +16,10 @@ rpsarc j archive.psarc __manifest.json
 # Extract files and write out_dir/__manifest.json
 rpsarc x archive.psarc out_dir
 
+# Extract only a folder or file extension
+rpsarc x --include txb archive.psarc out_dir
+rpsarc x --include "*.txb" archive.psarc out_dir
+
 # Override profile detection when exporting or extracting
 rpsarc j --profile ps3 archive.psarc __manifest.json
 rpsarc x --profile orbis_ps4 archive.psarc out_dir
