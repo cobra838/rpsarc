@@ -5,28 +5,31 @@ A simple psarc utility in rust
 
 ```
 # List files
-rpsarc l in_file.psarc
+rpsarc l archive.psarc
 
-# Extract an archive, out_dir/__manifest.json is for recreating
-rpsarc x in_file.psarc out_dir
+# Show header and detected writer profile
+rpsarc i archive.psarc
 
-# Create an archive
-rpsarc c out_dir/__manifest.json new_file.psarc
+# Export a JSON recipe without extracting files
+rpsarc j archive.psarc __manifest.json
+
+# Extract files and write out_dir/__manifest.json
+rpsarc x archive.psarc out_dir
+
+# Override profile detection when exporting or extracting
+rpsarc j --profile ps3 archive.psarc __manifest.json
+rpsarc x --profile orbis_ps4 archive.psarc out_dir
+
+# Create an archive from a JSON recipe
+rpsarc c out_dir/__manifest.json rebuilt.psarc
 ```
 
 ## Manifest
 
-`rpsarc x` writes `__manifest.json`.  For an archive that can be reproduced
-without recompression it is also a repack recipe: it contains the raw flags,
-ZSize table, offsets, storage mode and layout.  `rpsarc c` preserves that
-layout when `layout.mode` is `preserve`.
-
-For a manually authored manifest, or one without `layout`, `rpsarc c` uses the
-normal build mode below.  `compression_level` and `force_comp` are writer options;
-they are not recovered from an existing archive.
-
 ```javascript
 {
+  // Writer profile: ps3 or orbis_ps4
+  "profile": "ps3",
   // PSARC version
   "ver_maj": 1,
   "ver_min": 4,
@@ -56,3 +59,27 @@ they are not recovered from an existing archive.
   ]
 }
 ```
+
+### Orbis / PS4 options
+
+Set the common `profile` field to `"orbis_ps4"` to use the Orbis writer. It
+additionally accepts these fields:
+
+```javascript
+{
+  "profile": "orbis_ps4",
+  // Header flag 0x04: sort TOC entries by name MD5.
+  "sort_toc": true,
+  // Header flag 0x08: sort manifest names; uses NUL separators.
+  // false keeps input order and uses LF separators.
+  "sort_manifest": true,
+  // Compress the internal filename manifest with the selected zlib level.
+  "compress_manifest": true,
+  // Raw files at least this large are aligned before storage.
+  "file_align_size": 2097152,
+  "file_alignment": 65536
+}
+```
+
+The Orbis defaults are `sort_toc: true`, `sort_manifest: true`,
+`file_align_size: 2097152`, and `file_alignment: 65536`.
