@@ -204,7 +204,8 @@ fn load(in_file: PathBuf, profile_override: Option<&str>) -> Result<Loaded> {
     .into_iter()
     .map(|name| ManiFile {
       path: name.strip_prefix('/').unwrap_or(&name).to_owned(),
-      name: None,
+      // Preserve the manifest name for absolute-path archives.
+      name: header.abspath.then_some(name.to_owned()),
       compressed: Some(
         *stored_by_name
           .get(name.as_str())
