@@ -277,6 +277,7 @@ pub fn extract(
   out_dir: PathBuf,
   list_only: bool,
   profile: Option<String>,
+  includes: Vec<String>,
 ) -> Result<()> {
   let Loaded {
     mut file,
@@ -334,7 +335,18 @@ pub fn extract(
     return Ok(());
   }
 
-  let (block_infos, empty_files) = calc_blocks_info(bss, hdr.ents, hdr.blk_size)?;
+  let selected = namelist
+    .iter()
+    .enumerate()
+    .map(|(index, name)| {
+      index != 0
+        && (includes.is_empty()
+          || includes
+            .iter()
+            .any(|include| matches_include(name, include)))
+    })
+    .collect::<Vec<_>>();
+  let (block_infos, empty_files) = calc_blocks_info(bss, hdr.ents, hdr.blk_size, &selected)?;
 
   for i in empty_files {
     println!("empty file {}", namelist[i]);
@@ -406,10 +418,30 @@ pub fn extract(
     f.flush()?;
   }
 
-  File::create(out_dir.join("__manifest.json"))?
+  if includes.is_empty() {
+    File::create(out_dir.join("__manifest.json"))?
       .write_all(&serde_json::to_vec_pretty(&recipe)?)?;
+  }
 
   Ok(())
+}
+
+fn matches_include(path: &str, include: &str) -> bool {
+  let path = path.trim_start_matches('/');
+  let include = include.replace('\\', "/");
+  let include = include.trim_start_matches('/');
+  if include.ends_with('/') {
+    path.starts_with(include)
+  } else if let Some(suffix) = include.strip_prefix("**/*") {
+    path.ends_with(suffix)
+  } else if let Some(suffix) = include.strip_prefix('*') {
+    path.ends_with(suffix)
+  } else {
+    path == include
+      || path
+        .strip_prefix(include)
+        .is_some_and(|rest| rest.starts_with('/'))
+  }
 }
 
 #[derive(Clone)]
@@ -425,6 +457,7 @@ fn calc_blocks_info(
   bss: Vec<u32>,
   ents: Vec<Ent>,
   blk_size: u32,
+  selected: &[bool],
 ) -> Result<(Vec<BlkInfo>, Vec<usize>)> {
   let mut infos = bss
     .into_iter()
@@ -450,7 +483,7 @@ fn calc_blocks_info(
   ) in ents.into_iter().enumerate()
   {
     // Entry 0 is the internal PSARC filename manifest. It is parsed into __manifest.json and is not an extracted user file.
-    if i == 0 {
+    if i == 0 || !selected[i] {
       continue;
     }
     let bl = blk_idx as usize;
