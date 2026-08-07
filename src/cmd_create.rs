@@ -187,6 +187,10 @@ pub fn create(in_json: PathBuf, out_file: PathBuf) -> Result<()> {
       .div_ceil(blk_size as usize)
       .max(1)
       .try_into()?;
+    // Orbis applies its raw-file alignment rule to the internal manifest too.
+    pre_a[0].align_raw = is_orbis_ps4
+      && pre_a[0].c_level < 0
+      && pre_a[0].unc_len >= raw_align_size;
 
     (manifest, pre_a)
   };
