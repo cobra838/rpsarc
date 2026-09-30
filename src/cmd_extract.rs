@@ -224,6 +224,8 @@ fn load(in_file: PathBuf, profile_override: Option<&str>) -> Result<Loaded> {
 
   let compression_enabled =
     manifest_compressed || files.iter().any(|file| file.compressed == Some(true));
+  let has_raw_alignment =
+    profile.is_orbis() || (header.v_maj, header.v_min) == (1, 4);
   let recipe = ManiJson {
     profile: Some(profile.name().to_owned()),
     ver_maj: header.v_maj,
@@ -239,8 +241,10 @@ fn load(in_file: PathBuf, profile_override: Option<&str>) -> Result<Loaded> {
     compress_manifest: Some(manifest_compressed),
     sort_toc: profile.is_orbis().then_some(header.flags & 0x04 != 0),
     sort_manifest: profile.is_orbis().then_some(header.flags & 0x08 != 0),
-    file_align_size: Some(if profile.is_orbis() { 2097152 } else { 65536 }),
-    file_alignment: Some(if profile.is_orbis() { 65536 } else { 8192 }),
+    file_align_size: has_raw_alignment
+      .then_some(if profile.is_orbis() { 2097152 } else { 65536 }),
+    file_alignment: has_raw_alignment
+      .then_some(if profile.is_orbis() { 65536 } else { 8192 }),
     files,
   };
   Ok(Loaded {
