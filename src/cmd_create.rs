@@ -72,8 +72,10 @@ pub fn create(in_json: PathBuf, out_file: PathBuf) -> Result<()> {
 
   println!("- blocks: size {blk_size}");
 
+  // PS3 1.2 stores raw files consecutively;
   // PS3 1.4 aligns raw files larger than the threshold (">").
   // Orbis 1.4 aligns raw files at least as large as the threshold (">=").
+  let is_v4 = (v_maj, v_min) == (1, 4);
   let raw_align_size = json
     .file_align_size
     .unwrap_or(if is_orbis_ps4 { 2097152 } else { 65536 });
@@ -160,7 +162,7 @@ pub fn create(in_json: PathBuf, out_file: PathBuf) -> Result<()> {
           && if is_orbis_ps4 {
             unc_len >= raw_align_size
           } else {
-            unc_len > raw_align_size
+            is_v4 && unc_len > raw_align_size
           },
         n_blk: unc_len.div_ceil(blk_size as u64).max(1).try_into()?,
       });
