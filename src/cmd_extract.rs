@@ -147,8 +147,14 @@ fn load(in_file: PathBuf, profile_override: Option<&str>) -> Result<Loaded> {
     } else {
       md5::compute(name).0
     };
-    if by_md5.insert(md5, name.clone()).is_some() {
-      return Err(anyhow!("duplicate filename MD5 in manifest: {name}"));
+    if let Some(existing) = by_md5.get(&md5) {
+      if existing != name {
+        return Err(anyhow!(
+          "filename MD5 collision in manifest: {existing} and {name}"
+        ));
+      }
+    } else {
+      by_md5.insert(md5, name.clone());
     }
   }
 
