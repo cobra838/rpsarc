@@ -27,12 +27,26 @@ struct PreA {
   align_raw: bool,
 }
 
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Profile {
+  Ps3,
+  OrbisPs4,
+}
+
+impl Profile {
+  const fn is_orbis(self) -> bool {
+    matches!(self, Self::OrbisPs4)
+  }
+}
+
+
 pub fn create(in_json: PathBuf, out_file: PathBuf) -> Result<()> {
   let json_text = fs::read_to_string(&in_json)?;
   let json: ManiJson = serde_json::from_str(json_text.as_str())?;
-  let is_orbis_ps4 = match json.profile.as_deref() {
-    Some("orbis_ps4") => true,
-    Some("ps3") | None => false,
+  let profile = match json.profile.as_deref() {
+    Some("orbis_ps4") => Profile::OrbisPs4,
+    Some("ps3") | None => Profile::Ps3,
     Some(profile) => return Err(anyhow!("unknown manifest profile {profile}")),
   };
   let v_maj = json.ver_maj;
@@ -77,10 +91,10 @@ pub fn create(in_json: PathBuf, out_file: PathBuf) -> Result<()> {
   // Orbis 1.4 aligns raw files at least as large as the threshold (">=").
   let raw_align_size = json
     .file_align_size
-    .unwrap_or(if is_orbis_ps4 { 2097152 } else { 65536 });
+    .unwrap_or(if profile.is_orbis() { 2097152 } else { 65536 });
   let raw_alignment = json
     .file_alignment
-    .unwrap_or(if is_orbis_ps4 { 65536 } else { 8192 }) as u64;
+    .unwrap_or(if profile.is_orbis() { 65536 } else { 8192 }) as u64;
 
   if !raw_alignment.is_power_of_two() {
     return Err(anyhow!("file_alignment {raw_alignment} is not a power of two"));
@@ -158,10 +172,11 @@ pub fn create(in_json: PathBuf, out_file: PathBuf) -> Result<()> {
         c_force: mf.force_comp.unwrap_or(c_force),
         c_level: file_level,
         align_raw: file_level < 0
-          && if is_orbis_ps4 {
-            unc_len >= raw_align_size
-          } else {
-            (v_maj, v_min) == (1, 4) && unc_len > raw_align_size
+          && match profile {
+            Profile::OrbisPs4 => unc_len >= raw_align_size,
+            Profile::Ps3
+              if (v_maj, v_min) == (1, 4) => unc_len > raw_align_size,
+            Profile::Ps3 => false,
           },
         n_blk: unc_len.div_ceil(blk_size as u64).max(1).try_into()?,
       });
@@ -172,11 +187,11 @@ pub fn create(in_json: PathBuf, out_file: PathBuf) -> Result<()> {
       .map(|e| e.arc_name.as_str())
       .collect::<Vec<_>>();
 
-    if is_orbis_ps4 && json.sort_manifest.unwrap_or(true) {
+    if profile.is_orbis() && json.sort_manifest.unwrap_or(true) {
       manifest_names.sort_unstable();
     }
 
-    let manifest = if is_orbis_ps4 && json.sort_manifest.unwrap_or(true) {
+    let manifest = if profile.is_orbis() && json.sort_manifest.unwrap_or(true) {
       manifest_names.join("\0")
     } else {
       manifest_names.join("\n")
@@ -189,7 +204,7 @@ pub fn create(in_json: PathBuf, out_file: PathBuf) -> Result<()> {
       .max(1)
       .try_into()?;
     // Orbis applies its raw-file alignment rule to the internal manifest too.
-    pre_a[0].align_raw = is_orbis_ps4
+    pre_a[0].align_raw = profile.is_orbis()
       && pre_a[0].c_level < 0
       && pre_a[0].unc_len >= raw_align_size;
 
@@ -372,7 +387,7 @@ pub fn create(in_json: PathBuf, out_file: PathBuf) -> Result<()> {
     });
   }
 
-  if is_orbis_ps4 && json.sort_toc.unwrap_or(true) {
+  if profile.is_orbis() && json.sort_toc.unwrap_or(true) {
     ents[1..].sort_by(|a, b| a.name_md5.0.cmp(&b.name_md5.0));
   }
 
@@ -386,8 +401,8 @@ pub fn create(in_json: PathBuf, out_file: PathBuf) -> Result<()> {
     blk_size,
     flags: (if igncase { 1 } else { 0 })
       | (if abspath { 2 } else { 0 })
-      | (if is_orbis_ps4 && json.sort_toc.unwrap_or(true) { 4 } else { 0 })
-      | (if is_orbis_ps4 && json.sort_manifest.unwrap_or(true) { 8 } else { 0 }),
+      | (if profile.is_orbis() && json.sort_toc.unwrap_or(true) { 4 } else { 0 })
+      | (if profile.is_orbis() && json.sort_manifest.unwrap_or(true) { 8 } else { 0 }),
     igncase,
     abspath,
     ents,
