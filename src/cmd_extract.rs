@@ -52,7 +52,7 @@ fn has_orbis_alignment_layout(header: &Info, bss_raw: &[u32]) -> bool {
     for block in entry.blk_idx..entry.blk_idx + blocks {
       referenced.insert(block);
     }
-    if index == 0 || !unique.insert((entry.blk_idx, entry.blk_off, entry.unc_len)) {
+    if !unique.insert((entry.blk_idx, entry.blk_off, entry.unc_len)) {
       continue;
     }
 
@@ -67,7 +67,7 @@ fn has_orbis_alignment_layout(header: &Info, bss_raw: &[u32]) -> bool {
       if entry.unc_len >= 2_097_152 {
         orbis_spares += 1;
       }
-      if entry.unc_len > 65_536 {
+      if index != 0 && entry.unc_len > 65_536 {
         ps3_spares += 1;
       }
     }
