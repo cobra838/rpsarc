@@ -424,6 +424,12 @@ pub fn extract(
       }
     }
   }
+
+  // Do not create manifest for a partial extraction.
+  if let Some(err) = err {
+    return Err(err.into());
+  }
+
   for mut f in filelist.into_iter().flatten() {
     f.flush()?;
   }
@@ -496,8 +502,15 @@ fn calc_blocks_info(
     if i == 0 || !selected[i] {
       continue;
     }
+
+    // Empty files have a block index but no stored data. ZSize 0 means a full block, so interpreting their entry as data would read into the following file.
+    if unc_len == 0 {
+      empty.push(i);
+      continue;
+    }
+
     let bl = blk_idx as usize;
-    let br = (bl as u64 + unc_len.div_ceil(blk_size as u64).max(1)).try_into()?;
+    let br = (bl as u64 + unc_len.div_ceil(blk_size as u64)).try_into()?;
     let mut fp = blk_off;
     let mut fl = unc_len;
 
@@ -532,15 +545,9 @@ fn calc_blocks_info(
       }
       fl -= ebl as u64;
 
-      if unc_len > 0 {
-        f_write.push(i);
-      }
+      f_write.push(i);
     }
-    if unc_len > 0 {
-      infos[br - 1].f_close.push(i);
-    } else {
-      empty.push(i);
-    }
+    infos[br - 1].f_close.push(i);
   }
 
   // The internal manifest and alignment padding can leave ZSize entries with no extracted file block.
