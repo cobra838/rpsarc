@@ -66,8 +66,7 @@ rpsarc c out_dir/__manifest.json rebuilt.psarc
 
 ### Orbis / PS4 options
 
-Set the common `profile` field to `"orbis_ps4"` to use the Orbis writer. It
-additionally accepts these fields:
+Set the common `profile` field to `"orbis_ps4"` to use the Orbis writer. It additionally accepts these fields:
 
 ```javascript
 {
@@ -85,5 +84,8 @@ additionally accepts these fields:
 }
 ```
 
-The Orbis defaults are `sort_toc: true`, `sort_manifest: true`,
-`file_align_size: 2097152`, and `file_alignment: 65536`.
+## BUILD
+
+```bash
+cargo build --release
+```

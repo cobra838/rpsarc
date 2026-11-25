@@ -1,0 +1,86 @@
+name: Release
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build binary (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x86_64
+          - os: macos-latest
+            platform: macos-arm64
+          - os: windows-latest
+            platform: windows-x86_64
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust nightly
+        run: rustup toolchain install nightly --profile minimal
+
+      - name: Build
+        run: cargo +nightly build --release
+
+      - name: Package Linux and macOS binaries
+        if: runner.os != 'Windows'
+        shell: bash
+        run: tar -czf rpsarc-${{ matrix.platform }}.tar.gz -C target/release rpsarc
+
+      - name: Package Windows binary
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path target/release/rpsarc.exe -DestinationPath rpsarc-${{ matrix.platform }}.zip
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: rpsarc-${{ matrix.platform }}
+          path: rpsarc-${{ matrix.platform }}.*
+          if-no-files-found: error
+
+  publish:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Read version
+        id: version
+        shell: bash
+        run: |
+          version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+
+      - name: Download release artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: rpsarc-*
+          path: release
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: RPSARC ${{ steps.version.outputs.version }}
+          body: |
+            RPSARC ${{ steps.version.outputs.version }}.
+          fail_on_unmatched_files: true
+          files: release/*
